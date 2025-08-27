@@ -21,6 +21,7 @@ if (isset($_POST['action']) && $_POST['action'] === 'get_sources') {
     $selected_feeds = $_POST['feeds'] ?? [];
     $custom_stopwords_input = trim($_POST['custom_stopwords'] ?? '');
     $top_words_count = max(10, min(1000, (int)($_POST['top_words_count'] ?? 50)));
+    $view_filter = $_POST['view_filter'] ?? 'all';
     
     // Load saved settings
     $custom_feeds = [];
@@ -47,7 +48,15 @@ if (isset($_POST['action']) && $_POST['action'] === 'get_sources') {
             $analyzer = new RSSWordAnalyzer();
             $analyzer->processFeeds($selected_feeds, $custom_feeds, $custom_stopwords, $top_words_count);
             $sources = $analyzer->getWordSources($word);
-            echo json_encode(['sources' => $sources]);
+            
+            // Filter sources by selected feed if not showing all
+            if ($view_filter !== 'all') {
+                $sources = array_filter($sources, function($source) use ($view_filter) {
+                    return $source['feed'] === $view_filter;
+                });
+            }
+            
+            echo json_encode(['sources' => array_values($sources)]);
         } catch (Exception $e) {
             echo json_encode(['error' => $e->getMessage()]);
         }
@@ -285,12 +294,19 @@ class RSSWordAnalyzer {
         $this->word_frequency = [];
         $this->word_sources = [];
         $this->feed_stats = [];
+        $this->feed_word_frequency = []; // Store per-feed word frequencies
         
         foreach ($selected_feeds as $feed_name) {
             if (isset($all_feeds[$feed_name])) {
                 $articles = $this->fetchFeed($all_feeds[$feed_name]);
                 if ($articles) {
                     $words = $this->analyzeWords($articles, $feed_name, $stopwords);
+                    
+                    // Store feed-specific word frequency
+                    arsort($words);
+                    $this->feed_word_frequency[$feed_name] = array_slice($words, 0, $top_words_count, true);
+                    
+                    // Add to global frequency
                     foreach ($words as $word => $count) {
                         if (!isset($this->word_frequency[$word])) {
                             $this->word_frequency[$word] = 0;
@@ -311,6 +327,13 @@ class RSSWordAnalyzer {
         return $this->word_frequency;
     }
     
+    public function getFeedWordFrequency($feed_name = null) {
+        if ($feed_name && isset($this->feed_word_frequency[$feed_name])) {
+            return $this->feed_word_frequency[$feed_name];
+        }
+        return $this->feed_word_frequency ?? [];
+    }
+    
     public function getWordSources($word) {
         return $this->word_sources[$word] ?? [];
     }
@@ -327,6 +350,7 @@ $selected_feeds = [];
 $custom_feeds = [];
 $custom_stopwords = [];
 $top_words_count = 50; // Default value
+$view_filter = 'all'; // New: all feeds or specific feed
 $error_messages = [];
 
 // Load saved settings
@@ -345,6 +369,7 @@ if ($_POST) {
     $new_feed_url = trim($_POST['new_feed_url'] ?? '');
     $custom_stopwords_input = trim($_POST['custom_stopwords'] ?? '');
     $top_words_count = max(10, min(1000, (int)($_POST['top_words_count'] ?? 50)));
+    $view_filter = $_POST['view_filter'] ?? 'all';
     
     // Add new custom feed
     if ($new_feed_name && $new_feed_url) {
@@ -376,6 +401,7 @@ if ($_POST) {
 
 $all_feeds = array_merge($analyzer->default_feeds ?? [], $custom_feeds);
 $feed_stats = $analyzer->getFeedStats();
+$feed_word_frequencies = $analyzer->getFeedWordFrequency();
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -782,6 +808,21 @@ $feed_stats = $analyzer->getFeedStats();
                                 <span class="range-info">(10-1000)</span>
                             </div>
                         </div>
+                        
+                        <div class="form-group">
+                            <label>📊 View Results By:</label>
+                            <select name="view_filter" style="width: 100%; padding: 12px; border: 2px solid #e1e5e9; border-radius: 8px; font-size: 14px;">
+                                <option value="all" <?= $view_filter === 'all' ? 'selected' : '' ?>>All Feeds Combined</option>
+                                <?php if (!empty($selected_feeds)): ?>
+                                    <?php foreach ($selected_feeds as $feed_name): ?>
+                                        <option value="<?= htmlspecialchars($feed_name) ?>" 
+                                                <?= $view_filter === $feed_name ? 'selected' : '' ?>>
+                                            <?= htmlspecialchars($feed_name) ?> Only
+                                        </option>
+                                    <?php endforeach; ?>
+                                <?php endif; ?>
+                            </select>
+                        </div>
                     </div>
                     
                     <div class="form-grid">
@@ -818,59 +859,85 @@ $feed_stats = $analyzer->getFeedStats();
             <?php endif; ?>
             
             <?php if (!empty($results)): ?>
+                <?php
+                // Determine which results to display based on view filter
+                $display_results = $results;
+                $display_title = "All Feeds Combined";
+                
+                if ($view_filter !== 'all' && isset($feed_word_frequencies[$view_filter])) {
+                    $display_results = $feed_word_frequencies[$view_filter];
+                    $display_title = htmlspecialchars($view_filter) . " Only";
+                }
+                ?>
+                
                 <div class="results">
-                    <h2>📈 Analysis Results (Top <?= $top_words_count ?> Words)</h2>
+                    <h2>📈 Analysis Results - <?= $display_title ?> (Top <?= count($display_results) ?> Words)</h2>
                     
                     <div class="stats-grid">
                         <div class="stat-card">
-                            <h4><?= count($results) ?></h4>
+                            <h4><?= count($display_results) ?></h4>
                             <p>Unique Words Found</p>
                         </div>
                         <div class="stat-card">
-                            <h4><?= count($selected_feeds) ?></h4>
-                            <p>Feeds Analyzed</p>
+                            <h4><?= $view_filter === 'all' ? count($selected_feeds) : '1' ?></h4>
+                            <p><?= $view_filter === 'all' ? 'Feeds Analyzed' : 'Feed Selected' ?></p>
                         </div>
                         <div class="stat-card">
-                            <h4><?= array_sum($results) ?></h4>
+                            <h4><?= array_sum($display_results) ?></h4>
                             <p>Total Word Occurrences</p>
                         </div>
                         <div class="stat-card">
-                            <h4><?= array_sum(array_column($feed_stats, 'articles')) ?></h4>
+                            <h4><?= $view_filter === 'all' ? array_sum(array_column($feed_stats, 'articles')) : ($feed_stats[$view_filter]['articles'] ?? 0) ?></h4>
                             <p>Articles Processed</p>
                         </div>
                     </div>
                     
+                    <?php if ($view_filter !== 'all' && count($selected_feeds) > 1): ?>
+                        <div class="word-cloud" style="background: #e8f4fd; border-left: 4px solid #2196f3;">
+                            <div style="text-align: center; margin-bottom: 15px;">
+                                <strong>🔍 Filtered View Active</strong><br>
+                                <span style="color: #666; font-size: 0.9em;">
+                                    Showing results for "<strong><?= htmlspecialchars($view_filter) ?></strong>" only. 
+                                    <a href="#" onclick="document.getElementsByName('view_filter')[0].value='all'; document.querySelector('form').submit(); return false;" 
+                                       style="color: #2196f3; text-decoration: none;">View all feeds</a>
+                                </span>
+                            </div>
+                        </div>
+                    <?php endif; ?>
+                    
                     <div class="word-cloud">
                         <h3 style="text-align: center; margin-bottom: 20px; color: #2c3e50;">
-                            🏷️ Word Frequency Cloud
+                            🏷️ Word Frequency Cloud - <?= $display_title ?>
                         </h3>
                         <div class="word-tags">
                             <?php
-                            $max_count = max($results);
-                            $min_count = min($results);
-                            $range = $max_count - $min_count;
-                            
-                            $display_count = 0;
-                            foreach ($results as $word => $count):
-                                if ($display_count >= $top_words_count) break;
+                            if (!empty($display_results)) {
+                                $max_count = max($display_results);
+                                $min_count = min($display_results);
+                                $range = $max_count - $min_count;
                                 
-                                // Calculate size class based on frequency
-                                if ($range > 0) {
-                                    $ratio = ($count - $min_count) / $range;
-                                    if ($ratio > 0.7) $size_class = 'large';
-                                    elseif ($ratio > 0.4) $size_class = 'medium';
-                                    else $size_class = 'small';
-                                } else {
-                                    $size_class = 'medium';
-                                }
-                                $display_count++;
+                                foreach ($display_results as $word => $count):
+                                    // Calculate size class based on frequency
+                                    if ($range > 0) {
+                                        $ratio = ($count - $min_count) / $range;
+                                        if ($ratio > 0.7) $size_class = 'large';
+                                        elseif ($ratio > 0.4) $size_class = 'medium';
+                                        else $size_class = 'small';
+                                    } else {
+                                        $size_class = 'medium';
+                                    }
                             ?>
                                 <span class="word-tag <?= $size_class ?>" 
-                                      onclick="showWordSources('<?= htmlspecialchars($word) ?>', <?= $count ?>)"
+                                      onclick="showWordSources('<?= htmlspecialchars($word) ?>', <?= $count ?>, '<?= htmlspecialchars($view_filter) ?>')"
                                       title="<?= $count ?> occurrences">
                                     <?= htmlspecialchars($word) ?> (<?= $count ?>)
                                 </span>
-                            <?php endforeach; ?>
+                            <?php 
+                                endforeach;
+                            } else {
+                                echo '<p style="text-align: center; color: #666;">No words found for the selected filter.</p>';
+                            }
+                            ?>
                         </div>
                     </div>
                     
@@ -926,12 +993,13 @@ $feed_stats = $analyzer->getFeedStats();
     </div>
     
     <script>
-        function showWordSources(word, count) {
+        function showWordSources(word, count, viewFilter = 'all') {
             const modal = document.getElementById('sourcesModal');
             const title = document.getElementById('modalTitle');
             const content = document.getElementById('modalContent');
             
-            title.textContent = `"${word}" - ${count} occurrences`;
+            const filterText = viewFilter !== 'all' ? ` (from ${viewFilter})` : '';
+            title.textContent = `"${word}" - ${count} occurrences${filterText}`;
             content.innerHTML = '<p style="text-align: center; padding: 20px;">Loading sources...</p>';
             
             modal.style.display = 'block';
@@ -942,7 +1010,7 @@ $feed_stats = $analyzer->getFeedStats();
                 headers: {
                     'Content-Type': 'application/x-www-form-urlencoded',
                 },
-                body: `action=get_sources&word=${encodeURIComponent(word)}&${getFormData()}`
+                body: `action=get_sources&word=${encodeURIComponent(word)}&view_filter=${encodeURIComponent(viewFilter)}&${getFormData()}`
             })
             .then(response => response.json())
             .then(data => {
